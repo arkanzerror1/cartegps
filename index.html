@@ -97,6 +97,14 @@
   .pin.via { background: #6A1B9A; }
   .me { width: 18px; height: 18px; border-radius: 50%; background: #1e66f5; border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,102,245,.35); }
   .leaflet-container { font: inherit; }
+  .choice { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; margin-top: 8px;
+            text-align: left; background: var(--bg); color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  .choice.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .choice b { color: var(--accent); }
+  .choice small { color: var(--muted); }
+  .vp { font-size: 20px; line-height: 1; filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); }
+  .vp-pop b { display: block; margin-bottom: 4px; }
+  .vp-pop button { margin-top: 6px; padding: 6px 10px; font-size: .9rem; }
 </style>
 </head>
 <body>
@@ -136,6 +144,8 @@
     <div id="map"></div>
     <div class="pad">
       <div id="summary">Aucun trajet</div>
+      <div id="choices"></div>
+      <p id="viewsInfo" class="muted hidden"></p>
       <p class="muted" id="hint">Choisissez ce que place un appui sur la carte (arrivée, étape ou départ).
         Glissez les points pour modifier le trajet, touchez une étape pour la retirer.
         Le départ ne sert qu'à l'aperçu : la montre partira de sa propre position.</p>
@@ -159,13 +169,17 @@
   <section>
     <h2>Trajet</h2>
     <div class="seg">
-      <label><input type="radio" name="profile" value="c"><span>🚗 Voiture</span></label>
-      <label><input type="radio" name="profile" value="m" checked><span>🏍 Moto</span></label>
+      <label><input type="radio" name="profile" value="m" checked><span>🏁 Direct</span></label>
       <label><input type="radio" name="profile" value="b"><span>🌄 Balade</span></label>
     </div>
     <p class="muted" id="profileHint"></p>
-    <label class="check"><input id="avoidHw" type="checkbox"> Éviter les autoroutes</label>
-    <label class="check"><input id="avoidToll" type="checkbox"> Éviter les péages</label>
+    <div id="directOpts">
+      <label class="check"><input id="avoidHw" type="checkbox"> Éviter les autoroutes</label>
+      <label class="check"><input id="avoidToll" type="checkbox"> Éviter les péages</label>
+    </div>
+    <div id="baladeOpts">
+      <label class="check"><input id="showViews" type="checkbox" checked> Afficher les points de vue 📸 le long du trajet</label>
+    </div>
     <p style="margin:12px 0 0"><button id="stopBtn" class="ghost" type="button">Arrêter la navigation sur la montre</button></p>
   </section>
 
@@ -191,7 +205,9 @@
 const RELAY = "https://ntfy.sh/cartegps_";
 const NOMINATIM = "https://nominatim.openstreetmap.org";
 const VALHALLA = "https://valhalla1.openstreetmap.de/route";
-const MAX_VIAS = 5;
+const MAX_VIAS = 5;          // étapes ajoutées à la main
+const MAX_LOCK_VIAS = 8;     // le serveur accepte 10 points au total (départ et arrivée compris)
+const OVERPASS = "https://overpass-api.de/api/interpreter";
 const $ = (id) => document.getElementById(id);
 
 // --- Stockage local (protégé : peut être indisponible) ----------------------
@@ -204,6 +220,7 @@ const store = {
 let code = store.get("code", "");
 let favs = store.get("favs", []);
 let opts = store.get("opts", { profile: "m", hw: false, toll: false });
+if (opts.profile !== "b") opts.profile = "m";   // l'ancien choix "voiture" est identique à "direct"
 let lastTs = 0;
 
 // Trajet en préparation
@@ -212,6 +229,8 @@ let startManual = false;   // départ placé à la main : le GPS ne le déplace 
 let accuracyCircle = null;
 let dest = null;           // {lat, lon, name}
 let vias = [];             // [{lat, lon}]
+let candidates = [];       // itinéraires proposés : {pts, length, time, curv}
+let chosen = 0;
 
 // --- Relais vers la montre ----------------------------------------------------
 function clean(s) { return String(s).replace(/[|;~\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60); }
@@ -231,10 +250,24 @@ async function send(line, okText) {
   }
 }
 
-function sendTrip() {
+async function sendTrip() {
   if (!dest) return;
+  let sendVias = vias;
+  if (chosen > 0 && candidates[chosen]) {
+    // Option alternative : la montre ne la retrouverait pas seule, on la fixe par des points de passage
+    $("sendBtn").disabled = true;
+    showStatus("Préparation du tracé choisi…");
+    try {
+      sendVias = await lockRoute(candidates[chosen].pts);
+    } catch (e) {
+      showStatus("Impossible de préparer ce tracé (" + e.message + ").", "err");
+      return;
+    } finally {
+      $("sendBtn").disabled = false;
+    }
+  }
   const t = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  const viaField = vias.map(v => v.lat.toFixed(6) + ";" + v.lon.toFixed(6)).join("~");
+  const viaField = sendVias.map(v => [v.lat.toFixed(6), v.lon.toFixed(6)].concat(v.heading != null ? [v.heading] : []).join(";")).join("~");
   const etapes = vias.length ? ` avec ${vias.length} étape${vias.length > 1 ? "s" : ""}` : "";
   send(["D", nextTs(), dest.lat.toFixed(6), dest.lon.toFixed(6), clean(dest.name), optFields(), viaField].join("|"),
     `« ${dest.name} »${etapes} envoyé à ${t}. La montre le reçoit dans les 20 s.`);
@@ -410,42 +443,270 @@ function decodePolyline6(s) {
   return pts;
 }
 
-async function preview(fit) {
-  if (!dest || !start) return;
-  const seq = ++previewSeq;
-  const costing = opts.profile === "c" ? "auto" : "motorcycle";
-  // Balade : les grands axes deviennent peu attractifs, sans les interdire
-  const highways = opts.hw ? 0 : (opts.profile === "b" ? 0.1 : 1);
-  const body = {
+// Mêmes réglages que la montre (Router.mc). Balade : ni voies rapides ni péages,
+// ce qui fait passer par les routes départementales, plus sinueuses.
+function routeBody(from, through, to) {
+  const balade = opts.profile === "b";
+  return {
     locations: [
-      { lat: start.lat, lon: start.lon },
-      ...vias.map(v => ({ lat: v.lat, lon: v.lon, type: "through" })),
-      { lat: dest.lat, lon: dest.lon },
+      { lat: from.lat, lon: from.lon },
+      ...through.map(v => Object.assign({ lat: v.lat, lon: v.lon, type: "through" },
+        v.heading != null ? { heading: v.heading, heading_tolerance: 45 } : {})),
+      { lat: to.lat, lon: to.lon },
     ],
-    costing,
-    costing_options: { [costing]: { use_highways: highways, use_tolls: opts.toll ? 0 : 0.5 } },
+    costing: "motorcycle",
+    costing_options: { motorcycle: {
+      use_highways: balade || opts.hw ? 0 : 1,
+      use_tolls: balade || opts.toll ? 0 : 0.5,
+    } },
     directions_type: "none",
     units: "kilometers",
   };
-  $("summary").innerHTML = "Calcul…";
+}
+
+async function valhalla(body) {
+  const r = await fetch(VALHALLA + "?json=" + encodeURIComponent(JSON.stringify(body)));
+  const j = await r.json();
+  if (!j.trip) throw new Error(j.error || "aucun itinéraire");
+  return j;
+}
+
+const tripPoints = (t) => t.legs.flatMap(l => decodePolyline6(l.shape));
+
+// Sinuosité : degrés de virage cumulés par km (≈ 50 sur autoroute, 300 sur une route de col)
+function curviness(pts) {
+  let turn = 0, dist = 0, prev = null;
+  for (let i = 1; i < pts.length; i++) {
+    const dy = (pts[i][0] - pts[i - 1][0]) * 110540;
+    const dx = (pts[i][1] - pts[i - 1][1]) * 111320 * Math.cos(pts[i][0] * Math.PI / 180);
+    const len = Math.hypot(dx, dy);
+    if (len < 1) continue;
+    dist += len;
+    const h = Math.atan2(dx, dy);
+    if (prev !== null) {
+      let d = Math.abs(h - prev) * 180 / Math.PI;
+      if (d > 180) d = 360 - d;
+      if (d < 120) turn += d;      // au-delà : demi-tour ou bruit du tracé
+    }
+    prev = h;
+  }
+  return dist > 0 ? turn / (dist / 1000) : 0;
+}
+
+function curvLabel(c) {
+  if (c < 100) return "〰 peu sinueuse";
+  if (c < 200) return "〰〰 sinueuse";
+  if (c < 300) return "〰〰〰 très sinueuse";
+  return "〰〰〰〰 ultra sinueuse";
+}
+
+const fmtKm = (km) => (km < 10 ? km.toFixed(1) : Math.round(km)) + " km";
+function fmtTime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? h + " h " + String(m).padStart(2, "0") : m + " min";
+}
+
+async function preview(fit) {
+  if (!dest || !start) return;
+  const seq = ++previewSeq;
+  const body = routeBody(start, vias, dest);
+  // Balade sans étape : le serveur propose jusqu'à 2 variantes en plus
+  if (opts.profile === "b" && vias.length === 0) body.alternates = 2;
+  $("summary").textContent = "Calcul…";
   try {
-    const r = await fetch(VALHALLA + "?json=" + encodeURIComponent(JSON.stringify(body)));
-    const j = await r.json();
+    const j = await valhalla(body);
     if (seq !== previewSeq) return;            // un calcul plus récent a été lancé
-    if (!j.trip) throw new Error(j.error || "aucun itinéraire");
-    const pts = j.trip.legs.flatMap(l => decodePolyline6(l.shape));
-    routeLine.setLatLngs(pts);
-    const s = j.trip.summary;
-    const h = Math.floor(s.time / 3600), m = Math.round((s.time % 3600) / 60);
-    lastSummary = `${s.length < 10 ? s.length.toFixed(1) : Math.round(s.length)} km · ${h ? h + " h " + String(m).padStart(2, "0") : m + " min"}`;
-    updateSummaryName();
-    if (fit) map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+    candidates = [j.trip, ...(j.alternates || []).map(a => a.trip)].filter(Boolean).map(t => {
+      const pts = tripPoints(t);
+      return { pts, length: t.summary.length, time: t.summary.time, curv: curviness(pts) };
+    });
+    chosen = 0;
+    showCandidates(fit);
   } catch (e) {
     if (seq !== previewSeq) return;
-    routeLine.setLatLngs([]);
-    lastSummary = "";
+    candidates = [];
+    showCandidates(false);
     $("summary").textContent = "Aperçu indisponible : " + e.message;
   }
+}
+
+let altLines = [];
+
+function showCandidates(fit) {
+  altLines.forEach(l => l.remove());
+  altLines = [];
+  const c = candidates[chosen];
+  routeLine.setLatLngs(c ? c.pts : []);
+  candidates.forEach((o, i) => {
+    if (i === chosen) return;
+    const l = L.polyline(o.pts, { color: "#7a7385", weight: 5, opacity: .55, dashArray: "8 8" }).addTo(map);
+    l.on("click", () => choose(i));
+    altLines.push(l);
+  });
+  routeLine.bringToFront();
+
+  const box = $("choices");
+  box.replaceChildren();
+  if (candidates.length > 1) {
+    candidates.forEach((o, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "choice" + (i === chosen ? " on" : "");
+      const left = document.createElement("span");
+      const title = document.createElement("b");
+      title.textContent = "Option " + (i + 1);
+      left.append(title, ` ${fmtKm(o.length)} · ${fmtTime(o.time)}`);
+      const right = document.createElement("small");
+      right.textContent = curvLabel(o.curv);
+      b.append(left, right);
+      b.addEventListener("click", () => choose(i));
+      box.append(b);
+    });
+  }
+  lastSummary = c ? `${fmtKm(c.length)} · ${fmtTime(c.time)}` + (opts.profile === "b" ? " · " + curvLabel(c.curv).replace(/〰/g, "").trim() : "") : "";
+  updateSummaryName();
+  if (fit && c) map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+  loadViewpoints();
+}
+
+function choose(i) {
+  chosen = i;
+  showCandidates(false);
+}
+
+// Fixe un itinéraire alternatif par des points de passage : on recalcule à travers
+// ces points et on en ajoute là où le résultat s'écarte encore du tracé choisi.
+async function lockRoute(pts) {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + distM({ lat: pts[i - 1][0], lon: pts[i - 1][1] }, { lat: pts[i][0], lon: pts[i][1] }));
+  }
+  const total = cum[cum.length - 1];
+  const pick = (i) => {
+    const a = pts[Math.max(0, i - 2)], b = pts[Math.min(pts.length - 1, i + 2)];
+    const h = Math.atan2((b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180), b[0] - a[0]) * 180 / Math.PI;
+    return { lat: pts[i][0], lon: pts[i][1], heading: Math.round((h + 360) % 360), idx: i };
+  };
+  const at = (d) => Math.max(1, cum.findIndex(c => c >= d));
+  const locks = [1, 2, 3].map(k => pick(at(total * k / 4)));
+  for (let iter = 0; iter < 6; iter++) {
+    locks.sort((a, b) => a.idx - b.idx);
+    const rep = tripPoints((await valhalla(routeBody(start, locks, dest))).trip);
+    let worst = 0, worstI = -1;
+    for (let i = 0; i < pts.length; i += 3) {
+      let best = Infinity;
+      for (let j = 0; j < rep.length; j += 2) {
+        const d = Math.abs(pts[i][0] - rep[j][0]) * 110540 + Math.abs(pts[i][1] - rep[j][1]) * 80000;
+        if (d < best) best = d;
+      }
+      if (best > worst) { worst = best; worstI = i; }
+    }
+    if (worst < 250 || locks.length >= MAX_LOCK_VIAS) break;
+    locks.push(pick(worstI));
+  }
+  return locks.sort((a, b) => a.idx - b.idx);
+}
+
+// --- Points de vue (OpenStreetMap : tourism=viewpoint) le long de la balade -------------
+let viewMarkers = [];
+let viewSeq = 0;
+
+function clearViewpoints() {
+  viewMarkers.forEach(m => m.remove());
+  viewMarkers = [];
+  $("viewsInfo").classList.add("hidden");
+}
+
+async function loadViewpoints() {
+  clearViewpoints();
+  const seq = ++viewSeq;
+  const c = candidates[chosen];
+  if (!c || opts.profile !== "b" || !$("showViews").checked) return;
+  const info = $("viewsInfo");
+  info.textContent = "Recherche des points de vue…";
+  info.classList.remove("hidden");
+
+  // Points du tracé tous les ~500 m, pour mesurer la distance au trajet
+  const step = Math.max(1, Math.floor(c.pts.length / 600));
+  const samples = c.pts.filter((_, i) => i % step === 0);
+  const near = (p) => {
+    let best = Infinity;
+    for (const q of samples) best = Math.min(best, distM(p, { lat: q[0], lon: q[1] }));
+    return best;
+  };
+
+  let found = [];
+  try {
+    found = await viewpointsOverpass(c.pts);
+  } catch {
+    try { found = await viewpointsNominatim(c.pts, () => seq !== viewSeq); } catch {}
+  }
+  if (seq !== viewSeq) return;
+  const list = found.map(p => ({ ...p, d: near(p) })).filter(p => p.d < 2000)
+    .sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || a.d - b.d).slice(0, 30);
+
+  const icon = L.divIcon({ className: "", html: '<div class="vp">📸</div>', iconSize: [22, 22], iconAnchor: [11, 11] });
+  viewMarkers = list.map(p => {
+    const m = L.marker([p.lat, p.lon], { icon, title: p.name || "Point de vue" }).addTo(map);
+    const div = document.createElement("div");
+    div.className = "vp-pop";
+    const t = document.createElement("b");
+    t.textContent = p.name || "Point de vue";
+    const d = document.createElement("span");
+    d.textContent = `à ${p.d < 1000 ? Math.round(p.d / 10) * 10 + " m" : (p.d / 1000).toFixed(1) + " km"} du trajet`;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "Passer par ici";
+    add.addEventListener("click", () => {
+      if (vias.length >= MAX_VIAS) { showStatus(`${MAX_VIAS} étapes au maximum.`, "err"); return; }
+      map.closePopup();
+      vias.splice(bestViaIndex({ lat: p.lat, lon: p.lon }), 0, { lat: p.lat, lon: p.lon });
+      redraw(); preview();
+    });
+    div.append(t, document.createElement("br"), d, document.createElement("br"), add);
+    m.bindPopup(div);
+    return m;
+  });
+  info.textContent = list.length
+    ? `📸 ${list.length} point${list.length > 1 ? "s" : ""} de vue près du trajet : touchez-en un pour y passer.`
+    : "Aucun point de vue répertorié près de ce trajet.";
+}
+
+function routeBounds(pts, pad) {
+  let s = 90, w = 180, n = -90, e = -180;
+  for (const [la, lo] of pts) { s = Math.min(s, la); n = Math.max(n, la); w = Math.min(w, lo); e = Math.max(e, lo); }
+  return { s: s - pad, w: w - pad, n: n + pad, e: e + pad };
+}
+
+async function viewpointsOverpass(pts) {
+  const b = routeBounds(pts, 0.02);
+  const q = `[out:json][timeout:15];nwr["tourism"="viewpoint"](${b.s},${b.w},${b.n},${b.e});out center 500;`;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(OVERPASS, { method: "POST", body: new URLSearchParams({ data: q }), signal: ctl.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    return j.elements.map(el => ({
+      lat: el.lat ?? el.center?.lat, lon: el.lon ?? el.center?.lon, name: el.tags?.name || "",
+    })).filter(p => p.lat != null);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Secours si Overpass est saturé : recherche Nominatim par tronçons du trajet (1 requête/s)
+async function viewpointsNominatim(pts, cancelled) {
+  const chunk = Math.max(1, Math.floor(pts.length / 10));
+  const out = new Map();
+  for (let i = 0; i < pts.length && !cancelled(); i += chunk) {
+    const b = routeBounds(pts.slice(i, i + chunk + 1), 0.02);
+    const u = `${NOMINATIM}/search?format=jsonv2&limit=40&bounded=1&q=viewpoint&accept-language=fr&viewbox=${b.w},${b.n},${b.e},${b.s}`;
+    const r = await fetch(u);
+    if (r.ok) for (const o of await r.json()) out.set(o.place_id, { lat: +o.lat, lon: +o.lon, name: o.name || "" });
+    await new Promise(res => setTimeout(res, 1100));
+  }
+  return [...out.values()];
 }
 
 function updateSummaryName() {
@@ -459,7 +720,9 @@ function updateSummaryName() {
 
 function clearTrip() {
   dest = null; vias = []; lastSummary = "";
-  routeLine.setLatLngs([]);
+  candidates = []; chosen = 0;
+  viewSeq++;
+  showCandidates(false);
   redraw(); updateSummaryName();
 }
 
@@ -634,13 +897,15 @@ $("avoidHw").checked = opts.hw;
 $("avoidToll").checked = opts.toll;
 $("avoidHw").addEventListener("change", (e) => { opts.hw = e.target.checked; saveOpts(); });
 $("avoidToll").addEventListener("change", (e) => { opts.toll = e.target.checked; saveOpts(); });
+$("showViews").addEventListener("change", loadViewpoints);
 function saveOpts() { store.set("opts", opts); sendFavorites(true); profileHint(); preview(); }
 function profileHint() {
-  $("profileHint").textContent = {
-    c: "Itinéraire le plus rapide en voiture.",
-    m: "Itinéraire le plus rapide à moto (souvent le même qu'en voiture).",
-    b: "Balade : privilégie les routes secondaires, plus longues mais plus agréables à moto.",
-  }[opts.profile] || "";
+  const balade = opts.profile === "b";
+  $("profileHint").textContent = balade
+    ? "Balade : ni voies rapides ni péages, on passe par les départementales, plus sinueuses. Jusqu'à 3 options proposées sur la carte, avec les points de vue à ajouter comme étapes."
+    : "Itinéraire le plus rapide, en voiture comme à moto.";
+  $("directOpts").classList.toggle("hidden", balade);
+  $("baladeOpts").classList.toggle("hidden", !balade);
 }
 
 renderPairing();
