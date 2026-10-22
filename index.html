@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CarteGPS</title>
+<meta name="description" content="Choisir une destination et l'envoyer à la montre Garmin">
+<meta name="theme-color" content="#6A1B9A">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-512.png">
+<link rel="apple-touch-icon" href="icon-512.png">
+<style>
+  :root {
+    --accent: #6A1B9A;
+    --accent-ink: #ffffff;
+    --bg: #f6f4f9;
+    --card: #ffffff;
+    --ink: #1d1a22;
+    --muted: #6b6475;
+    --line: #e4dfeb;
+    --ok: #1b7f3a;
+    --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --accent: #b072d6;
+      --accent-ink: #1a0f22;
+      --bg: #141218;
+      --card: #1f1c24;
+      --ink: #ece6f0;
+      --muted: #a39cab;
+      --line: #36313d;
+      --ok: #6fd28f;
+      --err: #ffb4ab;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 10px; padding: 16px 0 8px; }
+  header img { width: 36px; height: 36px; border-radius: 9px; }
+  header h1 { font-size: 1.4rem; margin: 0; flex: 1; }
+  .pill { font-size: .8rem; padding: 4px 10px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.on { color: var(--ok); border-color: currentColor; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin: 12px 0; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  form { display: flex; gap: 8px; }
+  input[type=text], input[type=search], input[type=url] {
+    flex: 1; min-width: 0; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 11px 14px;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button.icon { padding: 8px 10px; background: transparent; color: var(--muted); font-size: 1.1rem; }
+  button:disabled { opacity: .5; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  li .txt { flex: 1; min-width: 0; }
+  li .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li .detail { font-size: .82rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+  .seg label { flex: 1; text-align: center; padding: 9px; cursor: pointer; }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--accent); font-weight: 700; }
+  .check { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+  .check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .muted { color: var(--muted); font-size: .88rem; }
+  #status { min-height: 1.4em; font-size: .9rem; margin: 6px 2px; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  details summary { cursor: pointer; color: var(--muted); }
+  details .row { display: flex; gap: 8px; margin-top: 10px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon-512.png" alt="">
+    <h1>CarteGPS</h1>
+    <span id="pairPill" class="pill">Non appairée</span>
+  </header>
+
+  <section id="pairCard" class="hidden">
+    <h2>Appairer la montre</h2>
+    <p class="muted">Sur la montre : ouvrez CarteGPS, appui long sur UP, puis « Code d'appairage ».</p>
+    <form id="pairForm">
+      <input id="pairInput" type="text" placeholder="ex. K7P2-9XQM" autocomplete="off" autocapitalize="characters" required>
+      <button>Valider</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Où allez-vous ?</h2>
+    <form id="searchForm">
+      <input id="q" type="search" placeholder="Adresse, lieu ou 43.44, 5.21" autocomplete="off" required>
+      <button id="searchBtn">Chercher</button>
+    </form>
+    <ul id="results"></ul>
+  </section>
+
+  <div id="status" role="status"></div>
+
+  <section>
+    <h2>Favoris</h2>
+    <ul id="favs"></ul>
+    <p id="favsEmpty" class="muted">Ajoutez un favori avec ☆ dans les résultats. Ils apparaissent aussi sur la montre (menu &gt; Destinations).</p>
+  </section>
+
+  <section>
+    <h2>Trajet</h2>
+    <div class="seg">
+      <label><input type="radio" name="profile" value="m" checked><span>🏍 Moto</span></label>
+      <label><input type="radio" name="profile" value="c"><span>🚗 Voiture</span></label>
+    </div>
+    <label class="check"><input id="avoidHw" type="checkbox"> Éviter les autoroutes</label>
+    <label class="check"><input id="avoidToll" type="checkbox"> Éviter les péages</label>
+    <p style="margin:12px 0 0"><button id="stopBtn" class="ghost" type="button">Arrêter la navigation sur la montre</button></p>
+  </section>
+
+  <section>
+    <details>
+      <summary>Réglages avancés</summary>
+      <div class="row">
+        <input id="tileUrl" type="url" placeholder="https://…/{z}/{x}/{y}.png">
+        <button id="tileBtn" class="ghost" type="button">Envoyer</button>
+      </div>
+      <p class="muted">Serveur de tuiles de la carte. Laissez vide pour garder celui par défaut.</p>
+      <div class="row"><button id="unpairBtn" class="ghost" type="button">Changer de montre</button></div>
+    </details>
+  </section>
+
+  <p class="muted">L'app CarteGPS doit être ouverte sur la montre : elle relève les messages toutes les 20 secondes.
+    Recherche © OpenStreetMap, itinéraires Valhalla.</p>
+</main>
+
+<script>
+"use strict";
+const RELAY = "https://ntfy.sh/cartegps_";
+const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+const $ = (id) => document.getElementById(id);
+
+// --- Stockage local (protégé : peut être indisponible) ----------------------
+const store = {
+  get(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch { return def; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem(k); } catch {} },
+};
+
+let code = store.get("code", "");
+let favs = store.get("favs", []);
+let opts = store.get("opts", { profile: "m", hw: false, toll: false });
+let lastTs = 0;
+
+// --- Relais -----------------------------------------------------------------
+function clean(s) { return String(s).replace(/[|;~\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60); }
+function nextTs() { lastTs = Math.max(Math.floor(Date.now() / 1000), lastTs + 1); return lastTs; }
+function optFields() { return [opts.profile, opts.hw ? 1 : 0, opts.toll ? 1 : 0].join("|"); }
+
+async function send(line, okText) {
+  if (!code) { showStatus("Appairez d'abord la montre.", "err"); return false; }
+  try {
+    const r = await fetch(RELAY + code, { method: "POST", body: line });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (okText) showStatus(okText, "ok");
+    return true;
+  } catch (e) {
+    showStatus("Envoi impossible (" + e.message + "). Vérifiez la connexion.", "err");
+    return false;
+  }
+}
+
+function sendDestination(p) {
+  const t = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  return send(["D", nextTs(), p.lat.toFixed(6), p.lon.toFixed(6), clean(p.name), optFields()].join("|"),
+    `« ${p.name} » envoyé à ${t}. La montre le reçoit dans les 20 s.`);
+}
+
+function sendFavorites(silent) {
+  const list = favs.slice(0, 15).map(f => [clean(f.name), f.lat.toFixed(5), f.lon.toFixed(5)].join(";")).join("~");
+  return send(["F", nextTs(), optFields(), list].join("|"), silent ? null : "Favoris envoyés à la montre.");
+}
+
+// --- Recherche ----------------------------------------------------------------
+function parseCoords(s) {
+  const m = s.match(/^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]\d+)?)\s*$/);
+  if (!m) return null;
+  const lat = parseFloat(m[1].replace(",", ".")), lon = parseFloat(m[2].replace(",", "."));
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return { name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`, detail: "Coordonnées GPS", lat, lon };
+}
+
+async function search(q) {
+  const c = parseCoords(q);
+  if (c) return [c];
+  const u = `${NOMINATIM}?format=jsonv2&limit=8&accept-language=fr&q=${encodeURIComponent(q)}`;
+  const r = await fetch(u);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return (await r.json()).map(o => ({
+    name: o.name || o.display_name.split(",")[0],
+    detail: o.display_name,
+    lat: parseFloat(o.lat),
+    lon: parseFloat(o.lon),
+  }));
+}
+
+// --- Affichage ----------------------------------------------------------------
+function showStatus(text, kind) {
+  const el = $("status");
+  el.textContent = text || "";
+  el.className = kind || "";
+}
+
+function placeItem(p, buttons) {
+  const li = document.createElement("li");
+  const txt = document.createElement("div");
+  txt.className = "txt";
+  const n = document.createElement("div"); n.className = "name"; n.textContent = p.name;
+  txt.append(n);
+  if (p.detail) { const d = document.createElement("div"); d.className = "detail"; d.textContent = p.detail; txt.append(d); }
+  li.append(txt, ...buttons);
+  return li;
+}
+
+function button(label, cls, onClick, title) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = label;
+  if (cls) b.className = cls;
+  if (title) { b.title = title; b.setAttribute("aria-label", title); }
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderResults(list) {
+  const ul = $("results");
+  ul.replaceChildren(...list.map(p => placeItem(p, [
+    button("☆", "icon", () => addFavorite(p), "Ajouter aux favoris"),
+    button("Y aller", "", () => sendDestination(p)),
+  ])));
+}
+
+function renderFavs() {
+  $("favsEmpty").classList.toggle("hidden", favs.length > 0);
+  $("favs").replaceChildren(...favs.map((p, i) => placeItem(p, [
+    button("✕", "icon", () => removeFavorite(i), "Supprimer"),
+    button("Y aller", "", () => sendDestination(p)),
+  ])));
+}
+
+function renderPairing() {
+  $("pairCard").classList.toggle("hidden", !!code);
+  const pill = $("pairPill");
+  pill.textContent = code ? "Montre " + code.slice(0, 4) + "-" + code.slice(4) : "Non appairée";
+  pill.classList.toggle("on", !!code);
+}
+
+function addFavorite(p) {
+  const name = prompt("Nom du favori (ex. Maison, Travail)", p.name);
+  if (name === null) return;
+  favs.push({ name: clean(name) || p.name, lat: p.lat, lon: p.lon });
+  store.set("favs", favs);
+  renderFavs();
+  sendFavorites();
+}
+
+function removeFavorite(i) {
+  favs.splice(i, 1);
+  store.set("favs", favs);
+  renderFavs();
+  sendFavorites();
+}
+
+// --- Événements ---------------------------------------------------------------
+$("searchForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if (!q) return;
+  $("searchBtn").disabled = true;
+  showStatus("Recherche…");
+  try {
+    const list = await search(q);
+    renderResults(list);
+    showStatus(list.length ? "" : "Aucun résultat.", list.length ? "" : "err");
+  } catch (err) {
+    showStatus("Recherche impossible (" + err.message + ").", "err");
+  } finally {
+    $("searchBtn").disabled = false;
+  }
+});
+
+$("pairForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const c = $("pairInput").value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (c.length !== 8) { showStatus("Le code fait 8 caractères (ex. K7P2-9XQM).", "err"); return; }
+  code = c;
+  store.set("code", code);
+  renderPairing();
+  sendFavorites(true);
+  showStatus("Montre appairée.", "ok");
+});
+
+$("unpairBtn").addEventListener("click", () => {
+  code = ""; store.del("code"); renderPairing();
+});
+
+$("stopBtn").addEventListener("click", () => send("X|" + nextTs(), "Navigation arrêtée sur la montre."));
+
+$("tileBtn").addEventListener("click", () => {
+  const url = $("tileUrl").value.trim();
+  if (url && !/^https:\/\/.+\{z\}.+\{x\}.+\{y\}|^https:\/\/.+\{z\}.+\{y\}.+\{x\}/.test(url)) {
+    showStatus("L'URL doit commencer par https:// et contenir {z}, {x} et {y}.", "err");
+    return;
+  }
+  send("T|" + nextTs() + "|" + (url || "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"),
+       "Serveur de tuiles envoyé.");
+});
+
+// Options : sauvegardées et envoyées avec les favoris (utilisées par la montre)
+for (const r of document.querySelectorAll("input[name=profile]")) {
+  r.checked = r.value === opts.profile;
+  r.addEventListener("change", () => { opts.profile = r.value; saveOpts(); });
+}
+$("avoidHw").checked = opts.hw;
+$("avoidToll").checked = opts.toll;
+$("avoidHw").addEventListener("change", (e) => { opts.hw = e.target.checked; saveOpts(); });
+$("avoidToll").addEventListener("change", (e) => { opts.toll = e.target.checked; saveOpts(); });
+function saveOpts() { store.set("opts", opts); sendFavorites(true); }
+
+renderPairing();
+renderFavs();
+</script>
+</body>
+</html>

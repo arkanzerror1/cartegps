@@ -1,0 +1,14 @@
+{
+  "name": "CarteGPS",
+  "short_name": "CarteGPS",
+  "description": "Choisir une destination et l'envoyer à la montre Garmin",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#6A1B9A",
+  "theme_color": "#6A1B9A",
+  "lang": "fr",
+  "icons": [
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
