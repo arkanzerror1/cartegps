@@ -4,15 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CarteGPS</title>
-<meta name="description" content="Choisir une destination et l'envoyer à la montre Garmin">
+<meta name="description" content="Préparer un trajet sur la carte et l'envoyer à la montre Garmin">
 <meta name="theme-color" content="#6A1B9A">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-512.png">
 <link rel="apple-touch-icon" href="icon-512.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
   :root {
     --accent: #6A1B9A;
     --accent-ink: #ffffff;
+    --route: #8E24AA;
     --bg: #f6f4f9;
     --card: #ffffff;
     --ink: #1d1a22;
@@ -40,7 +42,7 @@
     font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
   }
-  main { max-width: 560px; margin: 0 auto; }
+  main { max-width: 640px; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 10px; padding: 16px 0 8px; }
   header img { width: 36px; height: 36px; border-radius: 9px; }
   header h1 { font-size: 1.4rem; margin: 0; flex: 1; }
@@ -48,7 +50,8 @@
   .pill.on { color: var(--ok); border-color: currentColor; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin: 12px 0; }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
-  form { display: flex; gap: 8px; }
+  form, .row { display: flex; gap: 8px; }
+  .row { flex-wrap: wrap; align-items: center; }
   input[type=text], input[type=search], input[type=url] {
     flex: 1; min-width: 0; font: inherit; color: var(--ink); background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px;
@@ -60,7 +63,8 @@
   }
   button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
   button.icon { padding: 8px 10px; background: transparent; color: var(--muted); font-size: 1.1rem; }
-  button:disabled { opacity: .5; }
+  button.big { flex: 1; padding: 14px; font-size: 1.05rem; }
+  button:disabled { opacity: .45; cursor: default; }
   ul { list-style: none; margin: 0; padding: 0; }
   li { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
   li:first-child { border-top: 0; }
@@ -68,7 +72,7 @@
   li .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   li .detail { font-size: .82rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
-  .seg label { flex: 1; text-align: center; padding: 9px; cursor: pointer; }
+  .seg label { flex: 1; text-align: center; padding: 9px 6px; cursor: pointer; }
   .seg input { display: none; }
   .seg input:checked + span { color: var(--accent); font-weight: 700; }
   .check { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
@@ -77,8 +81,22 @@
   #status { min-height: 1.4em; font-size: .9rem; margin: 6px 2px; }
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
   details summary { cursor: pointer; color: var(--muted); }
-  details .row { display: flex; gap: 8px; margin-top: 10px; }
+  details .row { margin-top: 10px; }
   .hidden { display: none !important; }
+
+  /* Carte */
+  #mapCard { padding: 0; overflow: hidden; }
+  #mapCard .pad { padding: 12px 14px; }
+  #map { height: 56vh; min-height: 300px; max-height: 560px; background: #ddd; }
+  #summary { font-weight: 700; font-size: 1.05rem; }
+  #summary small { font-weight: 400; color: var(--muted); }
+  .pin { width: 26px; height: 26px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
+         border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.45); display: grid; place-items: center; }
+  .pin span { transform: rotate(45deg); color: #fff; font: 700 12px/1 system-ui, sans-serif; }
+  .pin.dest { background: #c62828; }
+  .pin.via { background: #6A1B9A; }
+  .me { width: 18px; height: 18px; border-radius: 50%; background: #1e66f5; border: 3px solid #fff; box-shadow: 0 0 0 2px rgba(30,102,245,.35); }
+  .leaflet-container { font: inherit; }
 </style>
 </head>
 <body>
@@ -107,12 +125,32 @@
     <ul id="results"></ul>
   </section>
 
+  <section id="mapCard">
+    <div class="pad">
+      <div class="seg" role="radiogroup" aria-label="Appui sur la carte">
+        <label><input type="radio" name="tapMode" value="dest" checked><span>📍 Placer l'arrivée</span></label>
+        <label><input type="radio" name="tapMode" value="via"><span>➕ Ajouter une étape</span></label>
+      </div>
+    </div>
+    <div id="map"></div>
+    <div class="pad">
+      <div id="summary">Aucun trajet</div>
+      <p class="muted" id="hint">Touchez la carte pour placer l'arrivée. Glissez les points pour modifier le trajet,
+        touchez une étape pour la retirer. Le départ réel sera la position de la montre.</p>
+      <div class="row">
+        <button id="sendBtn" class="big" type="button" disabled>Envoyer à la montre</button>
+        <button id="favBtn" class="ghost" type="button" disabled title="Ajouter aux favoris">☆</button>
+        <button id="clearBtn" class="ghost" type="button" disabled>Effacer</button>
+      </div>
+    </div>
+  </section>
+
   <div id="status" role="status"></div>
 
   <section>
     <h2>Favoris</h2>
     <ul id="favs"></ul>
-    <p id="favsEmpty" class="muted">Ajoutez un favori avec ☆ dans les résultats. Ils apparaissent aussi sur la montre (menu &gt; Destinations).</p>
+    <p id="favsEmpty" class="muted">Ajoutez un favori avec ☆. Ils apparaissent aussi sur la montre (menu &gt; Destinations).</p>
   </section>
 
   <section>
@@ -133,19 +171,22 @@
         <input id="tileUrl" type="url" placeholder="https://…/{z}/{x}/{y}.png">
         <button id="tileBtn" class="ghost" type="button">Envoyer</button>
       </div>
-      <p class="muted">Serveur de tuiles de la carte. Laissez vide pour garder celui par défaut.</p>
+      <p class="muted">Serveur de tuiles de la carte de la montre. Laissez vide pour garder celui par défaut.</p>
       <div class="row"><button id="unpairBtn" class="ghost" type="button">Changer de montre</button></div>
     </details>
   </section>
 
   <p class="muted">L'app CarteGPS doit être ouverte sur la montre : elle relève les messages toutes les 20 secondes.
-    Recherche © OpenStreetMap, itinéraires Valhalla.</p>
+    Carte et recherche © contributeurs OpenStreetMap, itinéraires Valhalla (FOSSGIS).</p>
 </main>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 const RELAY = "https://ntfy.sh/cartegps_";
-const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM = "https://nominatim.openstreetmap.org";
+const VALHALLA = "https://valhalla1.openstreetmap.de/route";
+const MAX_VIAS = 5;
 const $ = (id) => document.getElementById(id);
 
 // --- Stockage local (protégé : peut être indisponible) ----------------------
@@ -160,13 +201,18 @@ let favs = store.get("favs", []);
 let opts = store.get("opts", { profile: "m", hw: false, toll: false });
 let lastTs = 0;
 
-// --- Relais -----------------------------------------------------------------
+// Trajet en préparation
+let start = null;          // {lat, lon} : position du téléphone (ou point déplacé)
+let dest = null;           // {lat, lon, name}
+let vias = [];             // [{lat, lon}]
+
+// --- Relais vers la montre ----------------------------------------------------
 function clean(s) { return String(s).replace(/[|;~\r\n]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60); }
 function nextTs() { lastTs = Math.max(Math.floor(Date.now() / 1000), lastTs + 1); return lastTs; }
 function optFields() { return [opts.profile, opts.hw ? 1 : 0, opts.toll ? 1 : 0].join("|"); }
 
 async function send(line, okText) {
-  if (!code) { showStatus("Appairez d'abord la montre.", "err"); return false; }
+  if (!code) { showStatus("Appairez d'abord la montre (code affiché sur la montre).", "err"); return false; }
   try {
     const r = await fetch(RELAY + code, { method: "POST", body: line });
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -178,18 +224,22 @@ async function send(line, okText) {
   }
 }
 
-function sendDestination(p) {
+function sendTrip() {
+  if (!dest) return;
   const t = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  return send(["D", nextTs(), p.lat.toFixed(6), p.lon.toFixed(6), clean(p.name), optFields()].join("|"),
-    `« ${p.name} » envoyé à ${t}. La montre le reçoit dans les 20 s.`);
+  const viaField = vias.map(v => v.lat.toFixed(6) + ";" + v.lon.toFixed(6)).join("~");
+  const etapes = vias.length ? ` avec ${vias.length} étape${vias.length > 1 ? "s" : ""}` : "";
+  send(["D", nextTs(), dest.lat.toFixed(6), dest.lon.toFixed(6), clean(dest.name), optFields(), viaField].join("|"),
+    `« ${dest.name} »${etapes} envoyé à ${t}. La montre le reçoit dans les 20 s.`);
 }
 
 function sendFavorites(silent) {
+  if (!code && silent) return Promise.resolve(false);
   const list = favs.slice(0, 15).map(f => [clean(f.name), f.lat.toFixed(5), f.lon.toFixed(5)].join(";")).join("~");
   return send(["F", nextTs(), optFields(), list].join("|"), silent ? null : "Favoris envoyés à la montre.");
 }
 
-// --- Recherche ----------------------------------------------------------------
+// --- Recherche d'adresse ------------------------------------------------------
 function parseCoords(s) {
   const m = s.match(/^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]\d+)?)\s*$/);
   if (!m) return null;
@@ -201,7 +251,8 @@ function parseCoords(s) {
 async function search(q) {
   const c = parseCoords(q);
   if (c) return [c];
-  const u = `${NOMINATIM}?format=jsonv2&limit=8&accept-language=fr&q=${encodeURIComponent(q)}`;
+  let u = `${NOMINATIM}/search?format=jsonv2&limit=8&accept-language=fr&q=${encodeURIComponent(q)}`;
+  if (start) u += `&viewbox=${start.lon - 1},${start.lat + 1},${start.lon + 1},${start.lat - 1}`;
   const r = await fetch(u);
   if (!r.ok) throw new Error("HTTP " + r.status);
   return (await r.json()).map(o => ({
@@ -212,7 +263,198 @@ async function search(q) {
   }));
 }
 
-// --- Affichage ----------------------------------------------------------------
+async function placeName(lat, lon) {
+  try {
+    const r = await fetch(`${NOMINATIM}/reverse?format=jsonv2&zoom=18&accept-language=fr&lat=${lat}&lon=${lon}`);
+    const o = await r.json();
+    if (o.name) return o.name;
+    if (o.address) {
+      const a = o.address;
+      const street = [a.house_number, a.road].filter(Boolean).join(" ");
+      const town = a.village || a.town || a.city || "";
+      if (street || town) return [street, town].filter(Boolean).join(", ");
+    }
+    if (o.display_name) return o.display_name.split(",").slice(0, 2).join(",");
+  } catch {}
+  return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+}
+
+// --- Carte ------------------------------------------------------------------------
+const map = L.map("map", { zoomControl: true }).setView([46.6, 2.4], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+}).addTo(map);
+
+const routeLine = L.polyline([], { color: getComputedStyle(document.documentElement).getPropertyValue("--route").trim() || "#8E24AA", weight: 6, opacity: .9 }).addTo(map);
+let startMarker = null, destMarker = null, viaMarkers = [];
+
+function pinIcon(cls, label) {
+  return L.divIcon({ className: "", html: `<div class="pin ${cls}"><span>${label}</span></div>`, iconSize: [26, 26], iconAnchor: [3, 26] });
+}
+const meIcon = L.divIcon({ className: "", html: '<div class="me"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+
+function tapMode() { return document.querySelector("input[name=tapMode]:checked").value; }
+
+map.on("click", (e) => {
+  const p = { lat: e.latlng.lat, lon: e.latlng.lng };
+  if (tapMode() === "via" && dest) {
+    if (vias.length >= MAX_VIAS) { showStatus(`${MAX_VIAS} étapes au maximum.`, "err"); return; }
+    vias.splice(bestViaIndex(p), 0, p);
+    redraw(); preview();
+  } else {
+    setDestination({ ...p, name: "Point sur la carte" }, false, true);
+  }
+});
+
+// Insère l'étape là où elle allonge le moins le trajet
+function bestViaIndex(p) {
+  const chain = [start || dest, ...vias, dest];
+  const d = (a, b) => Math.hypot(a.lat - b.lat, (a.lon - b.lon) * Math.cos(a.lat * Math.PI / 180));
+  let best = 0, bestCost = Infinity;
+  for (let i = 0; i < chain.length - 1; i++) {
+    const cost = d(chain[i], p) + d(p, chain[i + 1]) - d(chain[i], chain[i + 1]);
+    if (cost < bestCost) { bestCost = cost; best = i; }
+  }
+  return best;
+}
+
+function redraw() {
+  if (start) {
+    if (!startMarker) {
+      startMarker = L.marker([start.lat, start.lon], { icon: meIcon, draggable: true, title: "Départ (aperçu)" }).addTo(map);
+      startMarker.on("dragend", () => { const ll = startMarker.getLatLng(); start = { lat: ll.lat, lon: ll.lng }; preview(); });
+    } else {
+      startMarker.setLatLng([start.lat, start.lon]);
+    }
+  }
+  if (dest) {
+    if (!destMarker) {
+      destMarker = L.marker([dest.lat, dest.lon], { icon: pinIcon("dest", "★"), draggable: true, title: "Arrivée" }).addTo(map);
+      destMarker.on("dragend", async () => {
+        const ll = destMarker.getLatLng();
+        dest = { lat: ll.lat, lon: ll.lng, name: "Point sur la carte" };
+        preview();
+        dest.name = await placeName(ll.lat, ll.lng);
+        updateSummaryName();
+      });
+    } else {
+      destMarker.setLatLng([dest.lat, dest.lon]);
+    }
+  } else if (destMarker) {
+    destMarker.remove(); destMarker = null;
+  }
+  viaMarkers.forEach(m => m.remove());
+  viaMarkers = vias.map((v, i) => {
+    const m = L.marker([v.lat, v.lon], { icon: pinIcon("via", i + 1), draggable: true, title: "Étape " + (i + 1) }).addTo(map);
+    m.on("dragend", () => { const ll = m.getLatLng(); vias[i] = { lat: ll.lat, lon: ll.lng }; preview(); });
+    m.on("click", () => { vias.splice(i, 1); redraw(); preview(); });
+    return m;
+  });
+  const has = !!dest;
+  $("sendBtn").disabled = !has;
+  $("favBtn").disabled = !has;
+  $("clearBtn").disabled = !has;
+}
+
+async function setDestination(p, fit, lookupName) {
+  dest = { lat: p.lat, lon: p.lon, name: p.name };
+  vias = [];
+  if (!start) {
+    // Sans position du téléphone : point de départ provisoire, déplaçable
+    const c = map.getCenter();
+    start = fit ? { lat: p.lat + 0.05, lon: p.lon - 0.05 } : { lat: c.lat, lon: c.lng };
+  }
+  redraw();
+  await preview(fit);
+  if (lookupName) {
+    dest.name = await placeName(p.lat, p.lon);
+    updateSummaryName();
+  }
+}
+
+// --- Aperçu de l'itinéraire (même service que la montre) ------------------------------
+let previewSeq = 0;
+let lastSummary = "";
+
+function decodePolyline6(s) {
+  const pts = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < s.length) {
+    for (let k = 0; k < 2; k++) {
+      let shift = 0, result = 0, b;
+      do { b = s.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (k === 0) lat += d; else lon += d;
+    }
+    pts.push([lat / 1e6, lon / 1e6]);
+  }
+  return pts;
+}
+
+async function preview(fit) {
+  if (!dest || !start) return;
+  const seq = ++previewSeq;
+  const costing = opts.profile === "c" ? "auto" : "motorcycle";
+  const body = {
+    locations: [
+      { lat: start.lat, lon: start.lon },
+      ...vias.map(v => ({ lat: v.lat, lon: v.lon, type: "through" })),
+      { lat: dest.lat, lon: dest.lon },
+    ],
+    costing,
+    costing_options: { [costing]: { use_highways: opts.hw ? 0 : 1, use_tolls: opts.toll ? 0 : 0.5 } },
+    directions_type: "none",
+    units: "kilometers",
+  };
+  $("summary").innerHTML = "Calcul…";
+  try {
+    const r = await fetch(VALHALLA + "?json=" + encodeURIComponent(JSON.stringify(body)));
+    const j = await r.json();
+    if (seq !== previewSeq) return;            // un calcul plus récent a été lancé
+    if (!j.trip) throw new Error(j.error || "aucun itinéraire");
+    const pts = j.trip.legs.flatMap(l => decodePolyline6(l.shape));
+    routeLine.setLatLngs(pts);
+    const s = j.trip.summary;
+    const h = Math.floor(s.time / 3600), m = Math.round((s.time % 3600) / 60);
+    lastSummary = `${s.length < 10 ? s.length.toFixed(1) : Math.round(s.length)} km · ${h ? h + " h " + String(m).padStart(2, "0") : m + " min"}`;
+    updateSummaryName();
+    if (fit) map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+  } catch (e) {
+    if (seq !== previewSeq) return;
+    routeLine.setLatLngs([]);
+    lastSummary = "";
+    $("summary").textContent = "Aperçu indisponible : " + e.message;
+  }
+}
+
+function updateSummaryName() {
+  if (!dest) { $("summary").textContent = "Aucun trajet"; return; }
+  const el = $("summary");
+  el.textContent = lastSummary || "…";
+  const sm = document.createElement("small");
+  sm.textContent = "  vers " + dest.name + (vias.length ? ` · ${vias.length} étape${vias.length > 1 ? "s" : ""}` : "");
+  el.append(sm);
+}
+
+function clearTrip() {
+  dest = null; vias = []; lastSummary = "";
+  routeLine.setLatLngs([]);
+  redraw(); updateSummaryName();
+}
+
+// Position du téléphone : sert de départ pour l'aperçu
+function locate() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition((pos) => {
+    const first = !start;
+    start = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    redraw();
+    if (dest) preview(); else if (first) map.setView([start.lat, start.lon], 12);
+  }, () => {}, { enableHighAccuracy: false, timeout: 10000, maximumAge: 120000 });
+}
+
+// --- Affichage des listes -------------------------------------------------------
 function showStatus(text, kind) {
   const el = $("status");
   el.textContent = text || "";
@@ -239,19 +481,21 @@ function button(label, cls, onClick, title) {
   return b;
 }
 
+function showOnMap(p) {
+  $("results").replaceChildren();
+  setDestination(p, true, false);
+  $("mapCard").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function renderResults(list) {
-  const ul = $("results");
-  ul.replaceChildren(...list.map(p => placeItem(p, [
-    button("☆", "icon", () => addFavorite(p), "Ajouter aux favoris"),
-    button("Y aller", "", () => sendDestination(p)),
-  ])));
+  $("results").replaceChildren(...list.map(p => placeItem(p, [button("Voir", "", () => showOnMap(p))])));
 }
 
 function renderFavs() {
   $("favsEmpty").classList.toggle("hidden", favs.length > 0);
   $("favs").replaceChildren(...favs.map((p, i) => placeItem(p, [
     button("✕", "icon", () => removeFavorite(i), "Supprimer"),
-    button("Y aller", "", () => sendDestination(p)),
+    button("Voir", "", () => showOnMap(p)),
   ])));
 }
 
@@ -278,7 +522,7 @@ function removeFavorite(i) {
   sendFavorites();
 }
 
-// --- Événements ---------------------------------------------------------------
+// --- Événements ---------------------------------------------------------------------
 $("searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("q").value.trim();
@@ -296,6 +540,10 @@ $("searchForm").addEventListener("submit", async (e) => {
   }
 });
 
+$("sendBtn").addEventListener("click", sendTrip);
+$("favBtn").addEventListener("click", () => dest && addFavorite(dest));
+$("clearBtn").addEventListener("click", clearTrip);
+
 $("pairForm").addEventListener("submit", (e) => {
   e.preventDefault();
   const c = $("pairInput").value.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -307,9 +555,7 @@ $("pairForm").addEventListener("submit", (e) => {
   showStatus("Montre appairée.", "ok");
 });
 
-$("unpairBtn").addEventListener("click", () => {
-  code = ""; store.del("code"); renderPairing();
-});
+$("unpairBtn").addEventListener("click", () => { code = ""; store.del("code"); renderPairing(); });
 
 $("stopBtn").addEventListener("click", () => send("X|" + nextTs(), "Navigation arrêtée sur la montre."));
 
@@ -323,7 +569,7 @@ $("tileBtn").addEventListener("click", () => {
        "Serveur de tuiles envoyé.");
 });
 
-// Options : sauvegardées et envoyées avec les favoris (utilisées par la montre)
+// Options : sauvegardées, envoyées avec les favoris, et appliquées à l'aperçu
 for (const r of document.querySelectorAll("input[name=profile]")) {
   r.checked = r.value === opts.profile;
   r.addEventListener("change", () => { opts.profile = r.value; saveOpts(); });
@@ -332,10 +578,12 @@ $("avoidHw").checked = opts.hw;
 $("avoidToll").checked = opts.toll;
 $("avoidHw").addEventListener("change", (e) => { opts.hw = e.target.checked; saveOpts(); });
 $("avoidToll").addEventListener("change", (e) => { opts.toll = e.target.checked; saveOpts(); });
-function saveOpts() { store.set("opts", opts); sendFavorites(true); }
+function saveOpts() { store.set("opts", opts); sendFavorites(true); preview(); }
 
 renderPairing();
 renderFavs();
+redraw();
+locate();
 </script>
 </body>
 </html>
