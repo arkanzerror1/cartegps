@@ -128,18 +128,21 @@
   <section id="mapCard">
     <div class="pad">
       <div class="seg" role="radiogroup" aria-label="Appui sur la carte">
-        <label><input type="radio" name="tapMode" value="dest" checked><span>📍 Placer l'arrivée</span></label>
-        <label><input type="radio" name="tapMode" value="via"><span>➕ Ajouter une étape</span></label>
+        <label><input type="radio" name="tapMode" value="dest" checked><span>📍 Arrivée</span></label>
+        <label><input type="radio" name="tapMode" value="via"><span>➕ Étape</span></label>
+        <label><input type="radio" name="tapMode" value="start"><span>🔵 Départ</span></label>
       </div>
     </div>
     <div id="map"></div>
     <div class="pad">
       <div id="summary">Aucun trajet</div>
-      <p class="muted" id="hint">Touchez la carte pour placer l'arrivée. Glissez les points pour modifier le trajet,
-        touchez une étape pour la retirer. Le départ réel sera la position de la montre.</p>
+      <p class="muted" id="hint">Choisissez ce que place un appui sur la carte (arrivée, étape ou départ).
+        Glissez les points pour modifier le trajet, touchez une étape pour la retirer.
+        Le départ ne sert qu'à l'aperçu : la montre partira de sa propre position.</p>
       <div class="row">
         <button id="sendBtn" class="big" type="button" disabled>Envoyer à la montre</button>
         <button id="favBtn" class="ghost" type="button" disabled title="Ajouter aux favoris">☆</button>
+        <button id="locBtn" class="ghost" type="button" title="Ma position">◎</button>
         <button id="clearBtn" class="ghost" type="button" disabled>Effacer</button>
       </div>
     </div>
@@ -156,9 +159,11 @@
   <section>
     <h2>Trajet</h2>
     <div class="seg">
-      <label><input type="radio" name="profile" value="m" checked><span>🏍 Moto</span></label>
       <label><input type="radio" name="profile" value="c"><span>🚗 Voiture</span></label>
+      <label><input type="radio" name="profile" value="m" checked><span>🏍 Moto</span></label>
+      <label><input type="radio" name="profile" value="b"><span>🌄 Balade</span></label>
     </div>
+    <p class="muted" id="profileHint"></p>
     <label class="check"><input id="avoidHw" type="checkbox"> Éviter les autoroutes</label>
     <label class="check"><input id="avoidToll" type="checkbox"> Éviter les péages</label>
     <p style="margin:12px 0 0"><button id="stopBtn" class="ghost" type="button">Arrêter la navigation sur la montre</button></p>
@@ -202,7 +207,9 @@ let opts = store.get("opts", { profile: "m", hw: false, toll: false });
 let lastTs = 0;
 
 // Trajet en préparation
-let start = null;          // {lat, lon} : position du téléphone (ou point déplacé)
+let start = null;          // {lat, lon} : position du téléphone, ou point placé à la main
+let startManual = false;   // départ placé à la main : le GPS ne le déplace plus
+let accuracyCircle = null;
 let dest = null;           // {lat, lon, name}
 let vias = [];             // [{lat, lon}]
 
@@ -298,7 +305,13 @@ function tapMode() { return document.querySelector("input[name=tapMode]:checked"
 
 map.on("click", (e) => {
   const p = { lat: e.latlng.lat, lon: e.latlng.lng };
-  if (tapMode() === "via" && dest) {
+  if (tapMode() === "start") {
+    start = p;
+    startManual = true;
+    if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
+    redraw(); preview();
+    showStatus("Départ placé à la main (pour l'aperçu).", "ok");
+  } else if (tapMode() === "via" && dest) {
     if (vias.length >= MAX_VIAS) { showStatus(`${MAX_VIAS} étapes au maximum.`, "err"); return; }
     vias.splice(bestViaIndex(p), 0, p);
     redraw(); preview();
@@ -323,7 +336,13 @@ function redraw() {
   if (start) {
     if (!startMarker) {
       startMarker = L.marker([start.lat, start.lon], { icon: meIcon, draggable: true, title: "Départ (aperçu)" }).addTo(map);
-      startMarker.on("dragend", () => { const ll = startMarker.getLatLng(); start = { lat: ll.lat, lon: ll.lng }; preview(); });
+      startMarker.on("dragend", () => {
+        const ll = startMarker.getLatLng();
+        start = { lat: ll.lat, lon: ll.lng };
+        startManual = true;
+        if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
+        preview();
+      });
     } else {
       startMarker.setLatLng([start.lat, start.lon]);
     }
@@ -360,12 +379,11 @@ function redraw() {
 async function setDestination(p, fit, lookupName) {
   dest = { lat: p.lat, lon: p.lon, name: p.name };
   vias = [];
-  if (!start) {
-    // Sans position du téléphone : point de départ provisoire, déplaçable
-    const c = map.getCenter();
-    start = fit ? { lat: p.lat + 0.05, lon: p.lon - 0.05 } : { lat: c.lat, lon: c.lng };
-  }
   redraw();
+  if (!start) {
+    map.setView([p.lat, p.lon], 13);
+    $("summary").textContent = "Placez le départ (🔵) pour voir l'aperçu";
+  }
   await preview(fit);
   if (lookupName) {
     dest.name = await placeName(p.lat, p.lon);
@@ -396,6 +414,8 @@ async function preview(fit) {
   if (!dest || !start) return;
   const seq = ++previewSeq;
   const costing = opts.profile === "c" ? "auto" : "motorcycle";
+  // Balade : les grands axes deviennent peu attractifs, sans les interdire
+  const highways = opts.hw ? 0 : (opts.profile === "b" ? 0.1 : 1);
   const body = {
     locations: [
       { lat: start.lat, lon: start.lon },
@@ -403,7 +423,7 @@ async function preview(fit) {
       { lat: dest.lat, lon: dest.lon },
     ],
     costing,
-    costing_options: { [costing]: { use_highways: opts.hw ? 0 : 1, use_tolls: opts.toll ? 0 : 0.5 } },
+    costing_options: { [costing]: { use_highways: highways, use_tolls: opts.toll ? 0 : 0.5 } },
     directions_type: "none",
     units: "kilometers",
   };
@@ -443,15 +463,50 @@ function clearTrip() {
   redraw(); updateSummaryName();
 }
 
-// Position du téléphone : sert de départ pour l'aperçu
-function locate() {
-  if (!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition((pos) => {
-    const first = !start;
-    start = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+// Position du téléphone : départ de l'aperçu. GPS précis et suivi en continu,
+// tant que le départ n'a pas été placé à la main.
+let geoWatch = null;
+let lastPreviewStart = null;
+
+function locate(recenter) {
+  if (!navigator.geolocation) {
+    showStatus("Ce navigateur ne donne pas la position : placez le départ (🔵) sur la carte.", "err");
+    return;
+  }
+  startManual = false;
+  if (geoWatch !== null) navigator.geolocation.clearWatch(geoWatch);
+  let first = true;
+  geoWatch = navigator.geolocation.watchPosition((pos) => {
+    if (startManual) return;
+    const c = pos.coords;
+    start = { lat: c.latitude, lon: c.longitude };
+    if (!accuracyCircle) {
+      accuracyCircle = L.circle([start.lat, start.lon], { radius: c.accuracy, color: "#1e66f5", weight: 1, fillOpacity: .08, interactive: false }).addTo(map);
+    } else {
+      accuracyCircle.setLatLng([start.lat, start.lon]).setRadius(c.accuracy);
+    }
     redraw();
-    if (dest) preview(); else if (first) map.setView([start.lat, start.lon], 12);
-  }, () => {}, { enableHighAccuracy: false, timeout: 10000, maximumAge: 120000 });
+    if (first) {
+      first = false;
+      if (recenter || !dest) map.setView([start.lat, start.lon], c.accuracy > 2000 ? 11 : 14);
+      if (c.accuracy > 1000) {
+        showStatus(`Position approximative (±${(c.accuracy / 1000).toFixed(1)} km) : activez la localisation précise du téléphone, ou placez le départ (🔵) à la main.`, "err");
+      }
+    }
+    // Aperçu recalculé seulement si le départ a bougé de plus de 200 m
+    if (dest && (!lastPreviewStart || distM(lastPreviewStart, start) > 200)) {
+      lastPreviewStart = start;
+      preview();
+    }
+  }, (err) => {
+    const why = err.code === 1 ? "refusée" : "indisponible";
+    showStatus(`Position du téléphone ${why} : placez le départ (🔵) sur la carte.`, "err");
+  }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+}
+
+function distM(a, b) {
+  const dy = (a.lat - b.lat) * 111320, dx = (a.lon - b.lon) * 111320 * Math.cos(a.lat * Math.PI / 180);
+  return Math.hypot(dx, dy);
 }
 
 // --- Affichage des listes -------------------------------------------------------
@@ -543,6 +598,7 @@ $("searchForm").addEventListener("submit", async (e) => {
 $("sendBtn").addEventListener("click", sendTrip);
 $("favBtn").addEventListener("click", () => dest && addFavorite(dest));
 $("clearBtn").addEventListener("click", clearTrip);
+$("locBtn").addEventListener("click", () => locate(true));
 
 $("pairForm").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -578,12 +634,20 @@ $("avoidHw").checked = opts.hw;
 $("avoidToll").checked = opts.toll;
 $("avoidHw").addEventListener("change", (e) => { opts.hw = e.target.checked; saveOpts(); });
 $("avoidToll").addEventListener("change", (e) => { opts.toll = e.target.checked; saveOpts(); });
-function saveOpts() { store.set("opts", opts); sendFavorites(true); preview(); }
+function saveOpts() { store.set("opts", opts); sendFavorites(true); profileHint(); preview(); }
+function profileHint() {
+  $("profileHint").textContent = {
+    c: "Itinéraire le plus rapide en voiture.",
+    m: "Itinéraire le plus rapide à moto (souvent le même qu'en voiture).",
+    b: "Balade : privilégie les routes secondaires, plus longues mais plus agréables à moto.",
+  }[opts.profile] || "";
+}
 
 renderPairing();
 renderFavs();
+profileHint();
 redraw();
-locate();
+locate(false);
 </script>
 </body>
 </html>
