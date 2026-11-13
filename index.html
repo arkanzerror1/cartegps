@@ -102,7 +102,7 @@
   .results.glass { background: var(--card); }   /* opaque : la liste passe devant le panneau */
   .results:empty { display: none; }
   .results li { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 16px; cursor: pointer; }
-  .results li:hover { background: var(--field); }
+  .results li:hover, .results li:focus { background: var(--field); outline: none; }
   .results .pinico { width: 38px; height: 38px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
 
   /* Ce que place un appui sur la carte */
@@ -387,7 +387,7 @@
       </div>
       <p class="muted" style="margin:8px 2px 0">Réglage avancé. Laissez vide puis « Envoyer » pour revenir au fond par défaut.</p>
       <p class="legal">CarteGPS doit être ouverte sur la montre, téléphone connecté (Garmin Connect).<br>
-        Données © contributeurs <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · itinéraires Valhalla · version 2.0</p>
+        Données © contributeurs <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · suggestions Photon · itinéraires Valhalla · version 2.1</p>
     </div>
   </div>
 </section>
@@ -430,6 +430,8 @@ const RELAY = "https://ntfy.sh/cartegps_";
 const NOMINATIM = "https://nominatim.openstreetmap.org";
 const VALHALLA = "https://valhalla1.openstreetmap.de/route";
 const OVERPASS = "https://overpass-api.de/api/interpreter";
+const PHOTON = "https://photon.komoot.io/api/";   // suggestions pendant la saisie (Nominatim l'interdit)
+const SUGGEST_DELAY_MS = 280;
 const DEFAULT_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}";
 const MAX_VIAS = 5;          // étapes ajoutées à la main
 const MAX_LOCK_VIAS = 8;     // le serveur accepte 10 points au total (départ et arrivée compris)
@@ -684,6 +686,59 @@ async function search(q) {
     lat: parseFloat(o.lat),
     lon: parseFloat(o.lon),
   }));
+}
+
+// Suggestions pendant la saisie : service Photon (données OpenStreetMap), prévu pour cet usage.
+// Les lieux proches de la position sont proposés en premier.
+async function suggestPlaces(q, signal) {
+  let u = `${PHOTON}?limit=6&lang=fr&q=${encodeURIComponent(q)}`;
+  if (start) u += `&lat=${start.lat.toFixed(3)}&lon=${start.lon.toFixed(3)}`;
+  const r = await fetch(u, { signal });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const seen = new Set();
+  const out = [];
+  for (const ft of (await r.json()).features || []) {
+    const p = ft.properties || {};
+    const street = [p.housenumber, p.street].filter(Boolean).join(" ");
+    const name = p.name || street || p.city;
+    if (!name || !ft.geometry) continue;
+    const town = [p.postcode, p.city || p.county].filter(Boolean).join(" ");
+    const detail = [p.name && street ? street : "", town !== name ? town : "", p.countrycode === "FR" ? p.state : p.country]
+      .filter(Boolean).join(", ");
+    const key = name + "|" + detail;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, detail, lat: ft.geometry.coordinates[1], lon: ft.geometry.coordinates[0] });
+  }
+  return out;
+}
+
+let suggestTimer = null;
+let suggestCtl = null;
+
+// Annule la suggestion en attente ou en cours (lieu choisi, recherche lancée, champ vidé)
+function cancelSuggest() {
+  clearTimeout(suggestTimer);
+  if (suggestCtl) { suggestCtl.abort(); suggestCtl = null; }
+}
+
+function onType() {
+  cancelSuggest();
+  const q = $("q").value.trim();
+  if (q.length < 3 || parseCoords(q)) {
+    if (!q) $("results").replaceChildren();
+    return;
+  }
+  suggestTimer = setTimeout(async () => {
+    const ctl = suggestCtl = new AbortController();
+    try {
+      const list = await suggestPlaces(q, ctl.signal);
+      if (ctl.signal.aborted) return;
+      if (list.length) renderResults(list);
+    } catch {
+      // Suggestions indisponibles : la recherche par Entrée reste possible
+    }
+  }, SUGGEST_DELAY_MS);
 }
 
 async function placeName(lat, lon) {
@@ -1248,7 +1303,9 @@ function button(label, cls, onClick, title, iconName) {
 
 // Destination choisie : on replie le panneau pour laisser voir la carte
 function showOnMap(p) {
+  cancelSuggest();
   $("results").replaceChildren();
+  $("q").value = p.name;
   $("q").blur();
   if (!desktop.matches) setSheet("peek");
   return setDestination(p, true, false);
@@ -1272,7 +1329,12 @@ function renderResults(list) {
     ico.innerHTML = icon("flag");
     li.append(ico, placeText(p));
     li.addEventListener("click", () => showOnMap(p));
-    li.addEventListener("keydown", (e) => { if (e.key === "Enter") showOnMap(p); });
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") showOnMap(p);
+      else if (e.key === "ArrowDown" && li.nextElementSibling) { e.preventDefault(); li.nextElementSibling.focus(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); (li.previousElementSibling || $("q")).focus(); }
+      else if (e.key === "Escape") { $("results").replaceChildren(); $("q").focus(); }
+    });
     return li;
   }));
 }
@@ -1352,6 +1414,7 @@ $("searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("q").value.trim();
   if (!q) return;
+  cancelSuggest();
   $("searchBtn").disabled = true;
   try {
     const list = await search(q);
@@ -1363,7 +1426,12 @@ $("searchForm").addEventListener("submit", async (e) => {
     $("searchBtn").disabled = false;
   }
 });
-$("q").addEventListener("input", () => { if (!$("q").value) $("results").replaceChildren(); });
+$("q").addEventListener("input", onType);
+// Échap : ferme la liste
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { cancelSuggest(); $("results").replaceChildren(); }
+  else if (e.key === "ArrowDown" && $("results").firstElementChild) { e.preventDefault(); $("results").firstElementChild.focus(); }
+});
 
 $("sendBtn").addEventListener("click", sendTrip);
 $("favBtn").addEventListener("click", () => dest && addFavorite(dest));
