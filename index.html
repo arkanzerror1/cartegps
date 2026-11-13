@@ -99,6 +99,7 @@
   .watch.on::after { background: var(--ok); }
   .watch span { display: none; }
   .results { list-style: none; margin: 0; padding: 6px; border-radius: var(--r); max-height: 46dvh; overflow: auto; }
+  .results.glass { background: var(--card); }   /* opaque : la liste passe devant le panneau */
   .results:empty { display: none; }
   .results li { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 16px; cursor: pointer; }
   .results li:hover { background: var(--field); }
@@ -258,7 +259,8 @@
   /* Grand écran : panneau fixe à gauche, carte derrière */
   @media (min-width: 900px) {
     :root { --peek: 0px; }
-    .top { left: 16px; right: auto; top: 16px; width: 420px; }
+    /* Au-dessus du panneau : la liste des résultats le recouvre */
+    .top { left: 16px; right: auto; top: 16px; width: 420px; z-index: 1200; }
     .top .modes { position: fixed; left: 452px; top: 22px; }
     .watch { width: auto; padding: 0 14px 0 12px; border-radius: 22px; gap: 8px; display: flex; }
     .watch span { display: inline; font-size: .82rem; font-weight: 800; }
@@ -1259,6 +1261,8 @@ async function quickSend(p) {
 }
 
 function renderResults(list) {
+  // Téléphone : panneau replié, sinon il passerait devant la liste
+  if (!desktop.matches && list.length) setSheet("peek");
   $("results").replaceChildren(...list.map(p => {
     const li = document.createElement("li");
     li.tabIndex = 0;
